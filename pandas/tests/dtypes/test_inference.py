@@ -729,6 +729,19 @@ class TestInference:
         result = lib.maybe_convert_objects(arr)
         tm.assert_numpy_array_equal(arr, result)
 
+    @pytest.mark.parametrize(
+        "value, expected_dtype",
+        [
+            *[(-(2**63) + i, np.int64) for i in (1, 3, 5, 7, 11)],
+            *[(2**64 - i, np.uint64) for i in (1, 3, 5, 7, 11)],
+        ],
+    )
+    def test_convert_int_lossless(self, value, expected_dtype):
+        # GH 58485
+        result = lib.maybe_convert_objects(np.array([value, None], dtype=object))
+        expected = np.array([value], dtype=expected_dtype)
+        tm.assert_numpy_array_equal(result[:1], expected)
+
     @pytest.mark.parametrize("val", [None, np.nan, float("nan")])
     @pytest.mark.parametrize("dtype", ["M8[ns]", "m8[ns]"])
     def test_maybe_convert_objects_nat_inference(self, val, dtype):
@@ -1746,20 +1759,6 @@ class TestTypeInference:
         val = index_or_series_or_array(data, dtype="boolean")
         inferred = lib.infer_dtype(val, skipna=skipna)
         assert inferred == "boolean"
-
-    def test_large_non_nullable_integer_objects(self):
-        # GH 58485
-        arr = np.array(
-            [
-                -9223372036854775808,
-                4611686018427387904,
-                9223372036854775807,
-                None,
-            ],
-            dtype="object",
-        )
-        with pytest.raises(ValueError, match="too large to be represented by float64"):
-            lib.maybe_convert_objects(arr)
 
 
 class TestNumberScalar:

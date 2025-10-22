@@ -116,12 +116,13 @@ cdef:
     object oUINT64_MAX = <uint64_t>UINT64_MAX
 
     float64_t NaN = <float64_t>np.nan
+    # GH 58485
     # the maximum absolute integer value that a 64-bit IEEE floating point number
-    # can store is when all 52 bits of its significand/mantissa are 1
-    # see: https://en.wikipedia.org/wiki/Double-precision_floating-point_format
+    # can store losslessly is when all 52 bits of its significand/mantissa are 1:
+    # 1. https://en.wikipedia.org/wiki/Double-precision_floating-point_format
     # related concept in JavaScript:
-    # https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MAX_SAFE_INTEGER
-    float64_t F64_SAFE_INT64_MAX = <float64_t>(2**53 - 1)
+    # 2. https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MAX_SAFE_INTEGER
+    uint64_t SAFE_UINT64_MAX = <uint64_t>(2**53 - 1)
 
 # python-visible
 i8max = <int64_t>INT64_MAX
@@ -2868,19 +2869,18 @@ def maybe_convert_objects(ndarray[object] objects,
                 elif seen.float_:
                     result = floats
                 elif seen.int_ or seen.uint_:
-                    if convert_to_nullable_dtype:
+                    if (
+                        convert_to_nullable_dtype
+                        or (np.maximum(uints, np.absolute(ints))[~mask] > SAFE_UINT64_MAX).any()
+                    ):
                         # Below we will wrap in IntegerArray
                         if seen.uint_:
+                            print(uints)
                             result = uints
                         else:
+                            print(ints)
                             result = ints
-                    elif (np.absolute(floats) > F64_SAFE_INT64_MAX).any():
-                        # GH 58485
-                        raise ValueError(
-                            "integer values with non-nullable dtype too large "
-                            "to be represented by float64"
-                            ", specify an integer dtype explicitly"
-                        )
+                        print(mask)
                     else:
                         result = floats
                 elif seen.nan_:
