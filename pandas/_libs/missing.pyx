@@ -24,6 +24,7 @@ from numpy cimport (
 cnp.import_array()
 
 from pandas._libs cimport util
+from pandas._libs.internal_na import C_NAType
 from pandas._libs.tslibs.nattype cimport (
     c_NaT as NaT,
     checknull_with_nat,
@@ -348,10 +349,6 @@ def _create_unary_propagating_op(name: str):
 
     method.__name__ = name
     return method
-
-
-cdef class C_NAType:
-    pass
 
 
 class NAType(C_NAType):

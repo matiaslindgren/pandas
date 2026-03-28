@@ -50,6 +50,14 @@ _khash_primitive_helper_dep = declare_dependency(
     sources: _khash_primitive_helper,
 )
 
+_internal_na_lib = shared_library(
+    'internal_na_lib',
+    'internal_na.pyx',
+)
+_internal_na_dep = declare_dependency(
+    link_with: [_internal_na_lib],
+)
+
 m_dep = cc.find_library('m', required: false)
 fast_float = subproject('fast_float')
 fast_float_dep = fast_float.get_variable('fast_float_dep')
@@ -72,7 +80,7 @@ libs_sources = {
             _hashtable_class_helper,
             _hashtable_func_helper,
         ],
-        'deps': _khash_primitive_helper_dep,
+        'deps': [_khash_primitive_helper_dep, _internal_na_dep],
     },
     'index': {
         'sources': ['index.pyx', _index_class_helper],
@@ -80,6 +88,7 @@ libs_sources = {
     },
     'indexing': {'sources': ['indexing.pyx']},
     'internals': {'sources': ['internals.pyx']},
+    'internal_na': {'sources': ['internal_na.pyx']},
     'interval': {
         'sources': ['interval.pyx', _intervaltree_helper],
         'deps': _khash_primitive_helper_dep,
@@ -96,8 +105,8 @@ libs_sources = {
         ],
         'deps': [fast_float_dep],
     },
-    'khash': {'sources': ['khash.pyx']},
-    'missing': {'sources': ['missing.pyx']},
+    'khash': {'sources': ['khash.pyx'], 'deps': [_internal_na_dep]},
+    'missing': {'sources': ['missing.pyx'], 'deps': [_internal_na_dep]},
     'pandas_datetime': {
         'sources': [
             'src/vendored/numpy/datetime/np_datetime.c',
