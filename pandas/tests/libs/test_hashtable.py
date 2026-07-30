@@ -969,3 +969,57 @@ def test_error_raised_from_eq_method_in_get_item(do_raise):
         # this looks odd but it is because key1.value == key2.value
         assert table.get_item(key1) == 456
         assert table.get_item(key2) == 456
+
+
+class no_hash:
+    # GH 57052: unhashable because __eq__ is defined without __hash__
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, no_hash) and self.value == other.value
+
+    __hash__ = None
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [[1, 2], [1, 2]],
+        [{"a": 1}, {"a": 1}],
+        [{1, 2}, {1, 2}],
+        [bytearray(b"ab"), bytearray(b"ab")],
+        [no_hash(1), no_hash(1)],
+    ],
+    ids=["list", "dict", "set", "bytearray", "no_hash"],
+)
+def test_unhashable_types_are_not_raised(values):
+    # GH 57052: making exceptions from __hash__ propagate must not change the
+    # handling of types that are unhashable by construction. These have always
+    # been given a hash of 0 so that they all land in one bucket and are then
+    # separated by __eq__, and that behaviour is preserved.
+    # build the object array element-wise, otherwise numpy unpacks the
+    # sequence-like entries into a 2-D array
+    arr = np.empty(len(values), dtype=object)
+    arr[:] = values
+
+    tm.assert_numpy_array_equal(
+        ht.duplicated(arr), np.array([False, True], dtype=np.bool_)
+    )
+    tm.assert_numpy_array_equal(
+        isin(arr, arr[:1]), np.array([True, True], dtype=np.bool_)
+    )
+    keys, counts, _ = ht.value_count(arr, dropna=False)
+    assert len(keys) == 1
+    tm.assert_numpy_array_equal(counts, np.array([2], dtype=np.int64))
+
+
+def test_unhashable_type_still_propagates_raising_hash():
+    # GH 57052: a __hash__ that exists but raises is a user error and must
+    # still surface, unlike the unhashable-by-construction case above.
+    key = hash_eq_raiser(value="hello", raise_hash=True)
+    arr = np.empty(2, dtype=object)
+    arr[:] = [key, key]
+
+    with pytest.raises(RuntimeError, match=re.escape(f"exception in {key!r}.__hash__")):
+        ht.duplicated(arr)
