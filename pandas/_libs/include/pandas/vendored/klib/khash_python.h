@@ -221,37 +221,44 @@ static inline int tupleobject_cmp(PyTupleObject *a, PyTupleObject *b) {
 }
 
 // GH#57052
-// this function assumes PyErr_Occurred is checked further up the call stack
+// True if `t` is pandas' NAType.
+//
+// Only ever called from the error path of pyobject_cmp, so the one-time
+// import cost is off the hot path entirely. It is safe to call with an
+// exception already set: the caller's pending exception is saved and
+// restored around the lookup, and any error raised by the lookup itself is
+// discarded.
 static inline bool pandas_is_NA(PyTypeObject *t) {
-  PyObject *module = NULL;
-  PyObject *na_type = NULL;
   static PyTypeObject *pandas_na_type = NULL;
-  bool is_na = false;
 
   if (pandas_na_type == NULL) {
-    if ((module = PyImport_ImportModule("pandas._libs.missing")) == NULL) {
-      goto end;
+    PyObject *err_type, *err_value, *err_tb;
+    PyErr_Fetch(&err_type, &err_value, &err_tb);
+
+    PyObject *module = PyImport_ImportModule("pandas._libs.missing");
+    if (module != NULL) {
+      PyObject *na_type = PyObject_GetAttrString(module, "NAType");
+      if (na_type != NULL) {
+        if (PyType_Check(na_type)) {
+          // Deliberately hold this reference until the interpreter exits so
+          // pandas_na_type can never dangle.
+          // This is a hack and should be cleaned up, possibly by generating
+          // NAType in this header or upstream of whatever compilation unit
+          // this header gets pulled into.
+          pandas_na_type = (PyTypeObject *)Py_NewRef(na_type);
+        }
+        Py_DECREF(na_type);
+      }
+      Py_DECREF(module);
     }
-    if ((na_type = PyObject_GetAttrString(module, "NAType")) == NULL) {
-      goto end;
-    }
-    if (PyType_Check(na_type) == 0) {
-      goto end;
-    }
-    // keep a reference to NAType forever (until the interpreter exits) to
-    // ensure pandas_na_type never points to an invalid address.
-    // this is a hack and should be cleaned up, possibly by generating NAType
-    // in this header or upstream of whatever compilation unit this header gets
-    // pulled into
-    Py_INCREF(na_type);
-    pandas_na_type = (PyTypeObject *)na_type;
+
+    // drop anything the lookup itself raised, then hand the caller's
+    // exception back untouched
+    PyErr_Clear();
+    PyErr_Restore(err_type, err_value, err_tb);
   }
 
-end:
-  is_na = t == pandas_na_type;
-  Py_XDECREF(na_type);
-  Py_XDECREF(module);
-  return is_na;
+  return t == pandas_na_type;
 }
 
 static inline int pyobject_cmp(PyObject *a, PyObject *b) {
@@ -280,14 +287,17 @@ static inline int pyobject_cmp(PyObject *a, PyObject *b) {
     }
     // frozenset isn't yet supported
   }
-  if (pandas_is_NA(a_type) || pandas_is_NA(b_type)) {
-    // GH#57052: PyObject_RichCompareBool would raise
-    // because comparing anything to pd.NA returns pd.NA
-    return 0;
-  }
 
   int result = PyObject_RichCompareBool(a, b, Py_EQ);
   if (result < 0) {
+    // GH#57052: comparing anything against pd.NA yields pd.NA, whose
+    // truthiness is ambiguous, so PyObject_RichCompareBool raises. That is
+    // not an error coming from user code, so swallow it and treat NA as
+    // unequal, as pandas did before GH#57052. Errors raised by a user's
+    // __eq__ are left set and propagate up through pymap_checked.
+    if (pandas_is_NA(a_type) || pandas_is_NA(b_type)) {
+      PyErr_Clear();
+    }
     return 0;
   }
   return result;
@@ -363,10 +373,23 @@ static inline Py_hash_t tupleobject_hash(PyTupleObject *key) {
   return acc;
 }
 
+// GH#57052
+// True for types that can never be hashed, i.e. those for which
+// `type(obj).__hash__ is None`. This covers the builtin containers
+// (list, dict, set, bytearray, ...) as well as user classes that define
+// __eq__ without __hash__ or set __hash__ = None explicitly. CPython
+// installs PyObject_HashNotImplemented in tp_hash for exactly these, so this
+// is a plain slot comparison with no interpreter involvement.
+static inline bool type_is_unhashable(PyTypeObject *t) {
+  return t->tp_hash == NULL || t->tp_hash == PyObject_HashNotImplemented;
+}
+
 static inline khuint32_t kh_python_hash_func(PyObject *key) {
-  if (PyErr_Occurred() != NULL) {
-    return 0;
-  }
+  // No PyErr_Occurred() guard here: khash calls the hash function exactly once
+  // at the start of an operation, and every pymap entry point bails out on a
+  // pending exception before reaching this point, so there can be none set.
+  // pyobject_cmp does need its guard, because khash keeps probing (and hence
+  // comparing) after a hash has already failed.
   Py_hash_t hash;
   // For PyObject_Hash holds:
   //    hash(0.0) == 0 == hash(-0.0)
@@ -385,13 +408,17 @@ static inline khuint32_t kh_python_hash_func(PyObject *key) {
   } else if (PyTuple_Check(key)) {
     // hash tuple subclasses as builtin tuples
     hash = tupleobject_hash((PyTupleObject *)key);
-  } else if (PyDict_Check(key) || PyList_Check(key)) {
+  } else if (type_is_unhashable(Py_TYPE(key))) {
     // Before GH 57052 was fixed, all exceptions raised from PyObject_Hash were
     // suppressed. Existing code that relies on this behaviour is for example:
     //   * _libs.hashtable.value_count_object via DataFrame.describe
     //   * _libs.hashtable.ismember_object via Series.isin
-    // Using hash = 0 puts all dict and list objects in the same bucket,
+    // Using hash = 0 puts all objects of unhashable types in the same bucket,
     // which is bad for performance but that is how it worked before.
+    // Note this deliberately only covers types that are unhashable by
+    // construction (tp_hash is unset or explicitly disabled, i.e.
+    // type(key).__hash__ is None). A __hash__ that exists but raises is still
+    // propagated, which is the behaviour GH#57052 asks for.
     hash = 0;
   } else {
     hash = PyObject_Hash(key);
